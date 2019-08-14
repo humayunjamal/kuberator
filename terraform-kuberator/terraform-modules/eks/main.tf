@@ -787,7 +787,7 @@ data:
         - system:bootstrappers
         - system:nodes
   mapUsers: |
-    - userarn: arn:aws:iam::387139262264:user/XYZUser
+    - userarn: arn:aws:iam::XYZ:user/XYZUser
       username: admin
       groups:
         - system:masters

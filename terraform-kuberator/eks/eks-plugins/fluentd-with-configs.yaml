@@ -1,0 +1,185 @@
+# fluentd-rbac.yml
+# If you have RBAC enabled
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentd
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: fluentd
+  namespace: kube-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: fluentd
+roleRef:
+  kind: ClusterRole
+  name: fluentd
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: fluentd
+  namespace: kube-system
+---
+# fluentd-daemonset.yml
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: kube-system
+  labels:
+    k8s-app: fluentd-logging
+    version: v1
+    kubernetes.io/cluster-service: "true"
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        k8s-app: fluentd-logging
+        version: v1
+        kubernetes.io/cluster-service: "true"
+    spec:
+      serviceAccount: fluentd # if RBAC is enabled
+      serviceAccountName: fluentd # if RBAC is enabled
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1.1-debian-elasticsearch
+        env:
+        - name:  FLUENT_ELASTICSEARCH_HOST
+          value: "ELASTICSERVICE-HOST"
+        - name:  FLUENT_ELASTICSEARCH_PORT
+          value: "443"
+        - name: FLUENT_ELASTICSEARCH_SCHEME
+          value: "https"
+        - name: FLUENT_ELASTICSEARCH_USER # even if not used they are necessary
+          value: "foo"
+        - name: FLUENT_ELASTICSEARCH_PASSWORD # even if not used they are necessary
+          value: "bar"
+        resources:
+          limits:
+            memory: 300Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluentd-config
+          mountPath: /fluentd/etc # path of fluentd config file
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluentd-config
+        configMap:
+          name: fluentd-config # name of the config map we will create
+---
+# fluentd-config-map.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: kube-system
+data:
+  fluent.conf: |
+    <match fluent.**>
+        # this tells fluentd to not output its log on stdout
+        @type null
+    </match>
+
+    # here we read the logs from Docker's containers and parse them
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type json
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+
+    # we use kubernetes metadata plugin to add metadatas to the log
+    <filter kubernetes.**>
+        @type kubernetes_metadata
+    </filter>
+
+    <filter kubernetes.**kong-moe**>
+      @type parser
+      key_name log
+      reserve_data true
+      <parse>
+        @type nginx
+      </parse>
+    </filter>
+
+    <match kubernetes.var.log.containers.**kube-system**.log>
+        @type null
+    </match>
+
+    # we send the logs to Elasticsearch
+    <match kubernetes.**kong-moe**>
+        @type elasticsearch
+        include_tag_key true
+        host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+        port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+        scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'https'}"
+        ssl_verify false
+        reload_connections true
+        logstash_prefix k8-kong
+        logstash_format true
+        <buffer>
+            flush_thread_count 8
+            flush_interval 5s
+            chunk_limit_size 2M
+            queue_limit_length 32
+            retry_max_interval 30
+            retry_forever true
+        </buffer>
+    </match>
+    <match kubernetes.**>
+        @type elasticsearch
+        include_tag_key true
+        host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+        port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+        scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'https'}"
+        ssl_verify false
+        reload_connections true
+        logstash_prefix k8-logstash
+        logstash_format true
+        <buffer>
+            flush_thread_count 8
+            flush_interval 5s
+            chunk_limit_size 2M
+            queue_limit_length 32
+            retry_max_interval 30
+            retry_forever true
+        </buffer>
+    </match>
